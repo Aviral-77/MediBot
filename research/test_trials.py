@@ -136,10 +136,10 @@ def load_vector_store(embeddings):
 
 
 # ============================================================
-# 9. Query Function
+# 9. Retriever Builder
 # ============================================================
 
-def query_vector_store(query: str, k: int = 3):
+def get_retriever(k: int = 3):
     embeddings = load_embeddings()
     store = load_vector_store(embeddings)
 
@@ -147,17 +147,25 @@ def query_vector_store(query: str, k: int = 3):
         search_type="similarity",
         search_kwargs={"k": k}
     )
+    return retriever
 
-    retrieved_docs = retriever.invoke(query)
+
+# ============================================================
+# 10. Debug Retrieval (optional)
+# ============================================================
+
+def debug_retrieval(retriever, query: str):
+    docs = retriever.invoke(query)
 
     print(f"\nQuery: {query}")
-    print(f"Retrieved {len(retrieved_docs)} documents:\n")
+    print(f"Retrieved {len(docs)} documents:\n")
 
-    for i, doc in enumerate(retrieved_docs, 1):
+    for i, doc in enumerate(docs, 1):
         print(f"Result {i}")
         print(f"Source: {doc.metadata.get('source')}")
         print(doc.page_content[:300])
         print("-" * 40)
+
 
 
 # ============================================================
@@ -186,9 +194,54 @@ def run_ingestion():
 # ============================================================
 
 if __name__ == "__main__":
-    
-    # Step 1: Run once to upload documents
-    run_ingestion()
 
-    # Step 2: Query
-    query_vector_store("What is Acne?")
+    # Step 1: Ingest documents (run once)
+    # run_ingestion()
+
+    # Step 2: Build retriever
+    retriever = get_retriever()
+
+    # Optional: inspect retrieval quality
+    debug_retrieval(retriever, "What is Acne?")
+
+    # ========================================================
+    # 12. LLM + RAG Chain
+    # ========================================================
+
+    # from langchain.chains import create_retrieval_chain
+    from langchain_classic.chains import create_retrieval_chain
+    from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+    from langchain_core.prompts import ChatPromptTemplate
+    # from langchain_openai import ChatOpenAI
+    # chat_model = ChatOpenAI(model="gpt-4o")
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    chat_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
+
+    system_prompt = (
+        "You are a medical assistant for question-answering tasks. "
+        "Use the following retrieved context to answer the question. "
+        "If you don't know the answer, say you don't know. "
+        "Use three sentences maximum and keep the answer concise.\n\n"
+        "{context}"
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("human", "{input}"),
+        ]
+    )
+
+    qa_chain = create_stuff_documents_chain(chat_model, prompt)
+    rag_chain = create_retrieval_chain(retriever, qa_chain)
+
+    # ========================================================
+    # 13. Ask Question
+    # ========================================================
+
+    response = rag_chain.invoke({
+        "input": "What is Acne?"
+    })
+
+    print("\n================ RAG ANSWER ================\n")
+    print(response["answer"])

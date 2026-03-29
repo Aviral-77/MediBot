@@ -1,194 +1,167 @@
-# ============================================================
-# 1. Imports & Environment Setup
-# ============================================================
-
-import os
-from dotenv import load_dotenv
+import os, json
 os.chdir("../")
-from typing import List
-from langchain_core.documents import Document
+
+# -------------------------Load environment variables-----------------------------------------
+from dotenv import load_dotenv
+load_dotenv()
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
+# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-
-from pinecone import Pinecone, ServerlessSpec
-from langchain_pinecone import PineconeVectorStore
+# ------------------------------------------------------------------
 
 
-# Load environment variables
-load_dotenv()
-
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-
-# ============================================================
-# 2. Configuration
-# ============================================================
-
-DATA_DIR = "data"
-INDEX_NAME = "medibot"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 20
-EMBEDDING_DIM = 384
-
-
-# ============================================================
-# 3. Document Loading
-# ============================================================
-
-def load_pdf_files(data_dir: str) -> List[Document]:
+# -----------------------Load document-------------------------------------------
+def load_pdf_files(data):
     loader = DirectoryLoader(
-        data_dir,
-        glob="*.pdf",
-        show_progress=True,
-        loader_cls=PyPDFLoader,
+        data, 
+        glob="*.pdf", 
+        show_progress=True, 
+        loader_cls=PyPDFLoader
     )
-    return loader.load()
 
+    documents = loader.load()
+    return documents
 
-# ============================================================
-# 4. Metadata Filtering
-# ============================================================
+# ----------------------------------------------------------------------------------
+
+# -----------------------Filter data------------------------------------------------
+from typing import List
+from langchain_core.documents import Document 
 
 def filter_to_minimal_docs(docs: List[Document]) -> List[Document]:
     minimal_docs = []
-
     for doc in docs:
-        minimal_docs.append(
-            Document(
-                page_content=doc.page_content,
-                metadata={
-                    "source": doc.metadata.get("source", "unknown")
-                },
-            )
+        src = doc.metadata.get("source", "unknown")
+        minimal_doc = Document(
+            page_content=doc.page_content,
+            metadata={"source": src}
         )
-
+        minimal_docs.append(minimal_doc)
     return minimal_docs
+# ------------------------------------------------------------------------------------
 
-
-# ============================================================
-# 5. Text Splitting
-# ============================================================
-
-def split_documents(docs: List[Document]) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
-    return splitter.split_documents(docs)
-
-
-# ============================================================
-# 6. Embedding Model
-# ============================================================
-
-def load_embeddings():
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL
-    )
-
-
-# ============================================================
-# 7. Pinecone Initialization
-# ============================================================
-
-def init_pinecone():
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-
-    existing_indexes = [idx["name"] for idx in pc.list_indexes()]
-
-    if INDEX_NAME not in existing_indexes:
-        pc.create_index(
-            name=INDEX_NAME,
-            dimension=EMBEDDING_DIM,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+# -----------------------Split the document into smaller chunks-----------------------
+def text_split(minimal_docs):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500, 
+        chunk_overlap=20,
         )
-        print(f"Created Pinecone index: {INDEX_NAME}")
-    else:
-        print(f"Pinecone index already exists: {INDEX_NAME}")
-
-    return pc
+    texts_chunk = text_splitter.split_documents(minimal_docs)
+    return texts_chunk
 
 
-# ============================================================
-# 8. Vector Store Operations
-# ============================================================
+# -------------------------------------------------------------------------------------
 
-def ingest_documents(chunks: List[Document], embeddings):
-    print("Uploading documents to Pinecone...")
-    
-    PineconeVectorStore.from_documents(
-        documents=chunks,
+# -----------------------Create embeddings-----------------------
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import SpacyEmbeddings
+
+def download_embeddings():
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    embeddings = HuggingFaceEmbeddings(
+        model_name=model_name
+    )
+    return embeddings
+# def download_embeddings():
+#     return SpacyEmbeddings(model_name="en_core_web_md")
+# -------------------------------------------------------------------------------------
+
+# -----------------------Create vector db (Chroma)-----------------------
+from langchain_community.vectorstores import Chroma
+
+def create_chroma_db(documents, embeddings):
+    # This automatically saves to the 'db' directory
+    vectorstore = Chroma.from_documents(
+        documents=documents, 
+        embedding=embeddings, 
+        persist_directory="./chroma_db"
+    )
+    return vectorstore
+
+# -----------------------Create vector db (Chroma)-----------------------
+from pinecone import Pinecone
+
+pc = Pinecone(api_key=PINECONE_API_KEY)
+print(pc)
+
+from pinecone import ServerlessSpec
+
+index_name = "medibot"
+try:
+    if index_name not in pc.list_indexes():
+        pc.create_index(
+            name=index_name,
+            dimension=384,  # Dimension of the embedding vectors
+            metric="cosine",  # Similarity metric
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")  # Auto-scaling configuration
+        )
+except Exception as e:
+    print(f"Index creation note: {e}")
+
+from langchain_community.vectorstores import Pinecone as PineconeVectorStore
+def create_pinecone_db(texts_chunk, embeddings):
+    vectorstore = PineconeVectorStore.from_documents(
+        documents=texts_chunk,
         embedding=embeddings,
-        index_name=INDEX_NAME,
+        index_name=index_name
     )
-
-    print("Upload complete.")
-
-
-def load_vector_store(embeddings):
-    return PineconeVectorStore.from_existing_index(
-        index_name=INDEX_NAME,
-        embedding=embeddings,
-    )
+    return vectorstore
 
 
-# ============================================================
-# 9. Query Function
-# ============================================================
 
-def query_vector_store(query: str, k: int = 3):
-    embeddings = load_embeddings()
-    store = load_vector_store(embeddings)
-
-    retriever = store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": k}
-    )
-
-    retrieved_docs = retriever.invoke(query)
-
-    print(f"\nQuery: {query}")
-    print(f"Retrieved {len(retrieved_docs)} documents:\n")
-
-    for i, doc in enumerate(retrieved_docs, 1):
-        print(f"Result {i}")
-        print(f"Source: {doc.metadata.get('source')}")
-        print(doc.page_content[:300])
-        print("-" * 40)
+# -------------------------------------------------------------------------------------
 
 
-# ============================================================
-# 10. Full Ingestion Pipeline
-# ============================================================
+extracted_data = load_pdf_files("data")     #LangChain returns in Document format which has page_content and metadata
+# print(len(extracted_data))
+# with open("extracted_data.txt", "w", encoding="utf-8") as f:
+#     for doc in extracted_data:
+#         # doc.page_content contains the actual text from the PDF
+#         f.write(doc.page_content + "\n" + "="*20 + "\n")
+minimal_docs = filter_to_minimal_docs(extracted_data)
+texts_chunk = text_split(minimal_docs)
+# print(texts_chunk)
+print(f"Number of text chunks: {len(texts_chunk)}")
+embedding = download_embeddings()
+# create_pinecone_db(texts_chunk, embedding)
+from langchain_pinecone import PineconeVectorStore
+# Embed each chunk and upsert the embeddings into your Pinecone index.
+docsearch = PineconeVectorStore.from_existing_index(
+    index_name=index_name,
+    embedding=embedding
+)
+# -----------------------------------------------------------------------------------
+#To add more documents in the future, you can use the following code:
+# dswith = Document(
+#     page_content="dswithbappy is a youtube channel that provides tutorials on various topics.",
+#     metadata={"source": "Youtube"}
+# )
+# docsearch.add_documents(documents=[dswith])
+# -----------------------------------------------------------------------------------
 
-def run_ingestion():
-    print("Loading PDFs...")
-    docs = load_pdf_files(DATA_DIR)
+# query = embedding.embed_query("Hello World")
+# print(query)
+# vector_db = create_chroma_db(texts_chunk, embedding)
+# vector_db.persist()
+# print("Vector store created and persisted to ./chroma_db")
 
-    print("Filtering metadata...")
-    docs = filter_to_minimal_docs(docs)
+# Define your medical query
+user_query = "What is Acne?"
 
-    print("Splitting documents...")
-    chunks = split_documents(docs)
-    print(f"Total chunks: {len(chunks)}")
+# Search the database for the top 3 most relevant chunks
+# docs = vector_db.similarity_search(user_query, k=3)
 
-    embeddings = load_embeddings()
+# print("\n--- Search Results ---")
+# for i, doc in enumerate(docs):
+#     print(f"Result {i+1}:")
+#     print(f"Source: {doc.metadata['source']}")
+#     print(f"Content: {doc.page_content[:200]}...") # Print first 200 chars
+#     print("-" * 30)
+# print(filtered_docs)
 
-    init_pinecone()
-    ingest_documents(chunks, embeddings)
 
-
-# ============================================================
-# 11. Main Execution
-# ============================================================
-
-if __name__ == "__main__":
-    
-    # Step 1: Run once to upload documents
-    run_ingestion()
-
-    # Step 2: Query
-    query_vector_store("What is Acne?")
